@@ -26,14 +26,16 @@ function App() {
   const [error, setError] = useState(null)
   const [selectedAlert, setSelectedAlert] = useState(null)
 
+  const API_URL = import.meta.env.VITE_API_URL
+
   const fetchData = async () => {
     try {
       const [statsRes, distRes, timeRes, alertRes] = await Promise.all([
-        fetch('http://127.0.0.1:8000/api/dashboard/stats'),
-        fetch('http://127.0.0.1:8000/api/dashboard/attack-distribution'),
-        fetch('http://127.0.0.1:8000/api/dashboard/timeline'),
-        fetch('http://127.0.0.1:8000/api/dashboard/recent-alerts')
-      ]);
+        fetch(`${API_URL}/api/dashboard/stats`),
+        fetch(`${API_URL}/api/dashboard/attack-distribution`),
+        fetch(`${API_URL}/api/dashboard/timeline`),
+        fetch(`${API_URL}/api/dashboard/recent-alerts`)
+      ])
 
       if (!statsRes.ok) throw new Error("Failed to fetch data")
 
