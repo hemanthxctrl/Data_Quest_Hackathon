@@ -15,11 +15,12 @@ app = FastAPI(title="AI Network Threat Detection API")
 
 # Configure CORS for frontend access
 origins = [
-    "http://localhost:5173", 
+    "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:5174",
     "http://127.0.0.1:5174",
     "http://localhost:3000",
+    "https://data-quest-hackathon.vercel.app",
 ]
 
 app.add_middleware(
@@ -49,27 +50,27 @@ def load_models():
     global network_threat_model, network_threat_features, network_threat_label_map
     global mongo_client, db
     try:
-        base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) # gets backend folder
+        base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         project_root = os.path.dirname(base_path)
-        
+
         models_dir = os.path.join(project_root, 'ml', 'models')
-        
+
         # Original models
         rf_path = os.path.join(models_dir, 'rf_pipeline.pkl')
         iso_path = os.path.join(models_dir, 'isolation_forest_pipeline.pkl')
-        
+
         if os.path.exists(rf_path):
             rf_pipeline = joblib.load(rf_path)
             iso_pipeline = joblib.load(iso_path)
             print("Original ML Pipelines loaded successfully.")
         else:
             print(f"Original models not found at {models_dir}.")
-            
+
         # New models
         nt_rf_path = os.path.join(models_dir, 'network_threat_rf_model.pkl')
         nt_features_path = os.path.join(models_dir, 'network_threat_feature_columns.pkl')
         nt_label_map_path = os.path.join(models_dir, 'network_threat_label_map.pkl')
-        
+
         if os.path.exists(nt_rf_path):
             network_threat_model = joblib.load(nt_rf_path)
             network_threat_features = joblib.load(nt_features_path)
@@ -77,13 +78,13 @@ def load_models():
             print("New Network Threat models loaded successfully.")
         else:
             print(f"New network threat models not found at {models_dir}.")
-            
+
         if mongodb_uri:
             mongo_client = MongoClient(mongodb_uri, serverSelectionTimeoutMS=2000)
             db = mongo_client[mongodb_database]
             mongo_client.admin.command('ping')
             print("Successfully connected to MongoDB.")
-            
+
     except Exception as e:
         print(f"Error during startup/loading: {e}")
         if 'mongo_client' in locals() and mongo_client:
@@ -107,24 +108,21 @@ def calculate_risk_score(attack_type: str, confidence: float) -> tuple[int, str]
         "WEB_ATTACK": 75,
         "WEBATTACK": 75
     }
-    
-    # Find base score, default to 50 if unknown attack type
+
     base_score = 50
     for key in base_scores:
         if key in attack_upper:
             base_score = base_scores[key]
             break
-            
+
     if "BENIGN" in attack_upper:
-        # Keep BENIGN strictly low, adjust slightly with uncertainty
         score = 5 + int((1.0 - confidence) * 10)
     else:
-        # Adjust based on confidence.
         adjustment = (confidence - 0.5) * 20
         score = base_score + int(adjustment)
-        
+
     score = max(0, min(100, score))
-    
+
     if score <= 24:
         level = "LOW"
     elif score <= 49:
@@ -133,12 +131,12 @@ def calculate_risk_score(attack_type: str, confidence: float) -> tuple[int, str]
         level = "HIGH"
     else:
         level = "CRITICAL"
-        
+
     return score, level
 
 def get_explanation_and_action(attack_type: str) -> tuple[str, str]:
     attack_upper = str(attack_type).upper()
-    
+
     mappings = {
         "BENIGN": {
             "explanation": "Traffic is classified as normal network activity.",
@@ -169,12 +167,11 @@ def get_explanation_and_action(attack_type: str) -> tuple[str, str]:
             "action": "Review web-server and application logs and investigate the source and affected endpoints."
         }
     }
-    
+
     for key, value in mappings.items():
         if key in attack_upper:
             return value["explanation"], value["action"]
-            
-    # Fallback
+
     return (
         "Traffic pattern is classified as abnormal network activity.",
         "Review network traffic logs and investigate the source."
@@ -187,30 +184,44 @@ def read_root():
 @app.get("/api/health")
 def health_check():
     models_status = "loaded" if (rf_pipeline or network_threat_model) else "missing"
-    return {"status": "ok", "service": "backend", "models": models_status, "message": "API is healthy"}
+    return {
+        "status": "ok",
+        "service": "backend",
+        "models": models_status,
+        "message": "API is healthy"
+    }
 
 @app.post("/api/predict")
 def predict_threat(flow: NetworkFlow):
     if not network_threat_model or not network_threat_features:
-        raise HTTPException(status_code=503, detail="Network threat models are not loaded.")
-    
-    # Create a DataFrame initialized with 0.0 for all expected features
-    df = pd.DataFrame(0.0, index=[0], columns=network_threat_features)
-    
-    # Populate the dataframe with incoming features that match expected columns
+        raise HTTPException(
+            status_code=503,
+            detail="Network threat models are not loaded."
+        )
+
+    df = pd.DataFrame(
+        0.0,
+        index=[0],
+        columns=network_threat_features
+    )
+
     for key, value in flow.features.items():
         if key in network_threat_features:
             df.at[0, key] = value
-            
-    # Predict
-    # Scikit-learn random forest natively outputs string classes
+
     prediction = network_threat_model.predict(df)[0]
     probabilities = network_threat_model.predict_proba(df)[0]
     confidence = float(max(probabilities))
-    
-    risk_score, risk_level = calculate_risk_score(prediction, confidence)
-    explanation, recommended_action = get_explanation_and_action(prediction)
-    
+
+    risk_score, risk_level = calculate_risk_score(
+        prediction,
+        confidence
+    )
+
+    explanation, recommended_action = get_explanation_and_action(
+        prediction
+    )
+
     response_data = {
         "attack_type": prediction,
         "confidence": confidence,
@@ -220,7 +231,7 @@ def predict_threat(flow: NetworkFlow):
         "explanation": explanation,
         "recommended_action": recommended_action
     }
-    
+
     if db is not None:
         try:
             document = {
@@ -233,51 +244,138 @@ def predict_threat(flow: NetworkFlow):
                 "recommended_action": recommended_action,
                 "features_processed": len(flow.features)
             }
+
             db.security_events.insert_one(document)
+
         except Exception as e:
             print(f"MongoDB insertion failed: {e}")
-            
+
     return response_data
 
 @app.get("/api/dashboard/stats")
 def get_dashboard_stats():
     if db is None:
-        return {"total_events": 0, "total_threats": 0, "critical": 0, "high": 0, "medium": 0, "low": 0}
-        
+        return {
+            "total_events": 0,
+            "total_threats": 0,
+            "critical": 0,
+            "high": 0,
+            "medium": 0,
+            "low": 0
+        }
+
     try:
         pipeline = [
-            {"$group": {
-                "_id": None,
-                "total_events": {"$sum": 1},
-                "total_threats": {"$sum": {"$cond": [{"$ne": ["$attack_type", "BENIGN"]}, 1, 0]}},
-                "critical": {"$sum": {"$cond": [{"$eq": ["$risk_level", "CRITICAL"]}, 1, 0]}},
-                "high": {"$sum": {"$cond": [{"$eq": ["$risk_level", "HIGH"]}, 1, 0]}},
-                "medium": {"$sum": {"$cond": [{"$eq": ["$risk_level", "MEDIUM"]}, 1, 0]}},
-                "low": {"$sum": {"$cond": [{"$eq": ["$risk_level", "LOW"]}, 1, 0]}}
-            }}
+            {
+                "$group": {
+                    "_id": None,
+                    "total_events": {"$sum": 1},
+                    "total_threats": {
+                        "$sum": {
+                            "$cond": [
+                                {"$ne": ["$attack_type", "BENIGN"]},
+                                1,
+                                0
+                            ]
+                        }
+                    },
+                    "critical": {
+                        "$sum": {
+                            "$cond": [
+                                {"$eq": ["$risk_level", "CRITICAL"]},
+                                1,
+                                0
+                            ]
+                        }
+                    },
+                    "high": {
+                        "$sum": {
+                            "$cond": [
+                                {"$eq": ["$risk_level", "HIGH"]},
+                                1,
+                                0
+                            ]
+                        }
+                    },
+                    "medium": {
+                        "$sum": {
+                            "$cond": [
+                                {"$eq": ["$risk_level", "MEDIUM"]},
+                                1,
+                                0
+                            ]
+                        }
+                    },
+                    "low": {
+                        "$sum": {
+                            "$cond": [
+                                {"$eq": ["$risk_level", "LOW"]},
+                                1,
+                                0
+                            ]
+                        }
+                    }
+                }
+            }
         ]
+
         result = list(db.security_events.aggregate(pipeline))
+
         if result:
             res = result[0]
             res.pop("_id", None)
             return res
-        return {"total_events": 0, "total_threats": 0, "critical": 0, "high": 0, "medium": 0, "low": 0}
+
+        return {
+            "total_events": 0,
+            "total_threats": 0,
+            "critical": 0,
+            "high": 0,
+            "medium": 0,
+            "low": 0
+        }
+
     except Exception as e:
         print(f"Error fetching stats: {e}")
-        return {"total_events": 0, "total_threats": 0, "critical": 0, "high": 0, "medium": 0, "low": 0}
+        return {
+            "total_events": 0,
+            "total_threats": 0,
+            "critical": 0,
+            "high": 0,
+            "medium": 0,
+            "low": 0
+        }
 
 @app.get("/api/dashboard/attack-distribution")
 def get_attack_distribution():
     if db is None:
         return {"distribution": []}
+
     try:
         pipeline = [
-            {"$group": {"_id": "$attack_type", "count": {"$sum": 1}}},
-            {"$project": {"attack_type": "$_id", "count": 1, "_id": 0}},
-            {"$sort": {"count": -1}}
+            {
+                "$group": {
+                    "_id": "$attack_type",
+                    "count": {"$sum": 1}
+                }
+            },
+            {
+                "$project": {
+                    "attack_type": "$_id",
+                    "count": 1,
+                    "_id": 0
+                }
+            },
+            {
+                "$sort": {
+                    "count": -1
+                }
+            }
         ]
+
         result = list(db.security_events.aggregate(pipeline))
         return {"distribution": result}
+
     except Exception as e:
         print(f"Error fetching attack distribution: {e}")
         return {"distribution": []}
@@ -286,29 +384,59 @@ def get_attack_distribution():
 def get_timeline():
     if db is None:
         return {"timeline": []}
+
     try:
         pipeline = [
-            {"$group": {
-                "_id": {
-                    "year": {"$year": "$timestamp"},
-                    "month": {"$month": "$timestamp"},
-                    "day": {"$dayOfMonth": "$timestamp"},
-                    "hour": {"$hour": "$timestamp"},
-                    "minute": {"$minute": "$timestamp"}
-                },
-                "events": {"$sum": 1},
-                "threats": {"$sum": {"$cond": [{"$ne": ["$attack_type", "BENIGN"]}, 1, 0]}}
-            }},
-            {"$sort": {"_id.year": 1, "_id.month": 1, "_id.day": 1, "_id.hour": 1, "_id.minute": 1}},
-            {"$limit": 60}
+            {
+                "$group": {
+                    "_id": {
+                        "year": {"$year": "$timestamp"},
+                        "month": {"$month": "$timestamp"},
+                        "day": {"$dayOfMonth": "$timestamp"},
+                        "hour": {"$hour": "$timestamp"},
+                        "minute": {"$minute": "$timestamp"}
+                    },
+                    "events": {"$sum": 1},
+                    "threats": {
+                        "$sum": {
+                            "$cond": [
+                                {"$ne": ["$attack_type", "BENIGN"]},
+                                1,
+                                0
+                            ]
+                        }
+                    }
+                }
+            },
+            {
+                "$sort": {
+                    "_id.year": 1,
+                    "_id.month": 1,
+                    "_id.day": 1,
+                    "_id.hour": 1,
+                    "_id.minute": 1
+                }
+            },
+            {
+                "$limit": 60
+            }
         ]
+
         result = list(db.security_events.aggregate(pipeline))
         timeline = []
+
         for r in result:
             _id = r["_id"]
             time_str = f"{_id.get('hour', 0):02d}:{_id.get('minute', 0):02d}"
-            timeline.append({"time": time_str, "events": r["events"], "threats": r["threats"]})
+
+            timeline.append({
+                "time": time_str,
+                "events": r["events"],
+                "threats": r["threats"]
+            })
+
         return {"timeline": timeline}
+
     except Exception as e:
         print(f"Error fetching timeline: {e}")
         return {"timeline": []}
@@ -317,10 +445,19 @@ def get_timeline():
 def get_recent_alerts():
     if db is None:
         return {"alerts": []}
+
     try:
-        cursor = db.security_events.find({}, {"_id": 0}).sort("timestamp", -1).limit(10)
+        cursor = db.security_events.find(
+            {},
+            {"_id": 0}
+        ).sort(
+            "timestamp",
+            -1
+        ).limit(10)
+
         alerts = list(cursor)
         return {"alerts": alerts}
+
     except Exception as e:
         print(f"Error fetching recent alerts: {e}")
         return {"alerts": []}
